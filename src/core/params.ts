@@ -197,8 +197,9 @@ export function trackToValue(meta: ParamMeta, t: number): number {
   } else {
     v = meta.min + (meta.max - meta.min) * c;
   }
-  // Snap to step.
-  v = Math.round(v / meta.step) * meta.step;
+  // Snap to step, offset from min (so e.g. min 1 / step 2 snaps to 1 or 3,
+  // never the invalid value 2).
+  v = meta.min + Math.round((v - meta.min) / meta.step) * meta.step;
   return Math.min(meta.max, Math.max(meta.min, v));
 }
 
