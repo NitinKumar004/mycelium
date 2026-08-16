@@ -29,7 +29,11 @@ export class Loop {
 
   readonly stats: FrameStats = { fps: 60, frameMs: 16.7, substeps: 1 };
 
-  constructor(private step: StepFn, private render: RenderFn) {}
+  constructor(private step: StepFn, private render: RenderFn) {
+    // Seed the window with 16.7ms so the rolling median reports ~60fps from the
+    // first frame instead of 0 while the buffer fills.
+    this.window.fill(1000 / 60);
+  }
 
   start(): void {
     if (this.running) return;
