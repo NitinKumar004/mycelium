@@ -1,0 +1,19 @@
+{
+  "name": "mycelium",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A GPU-simulated living particle universe — Physarum transport networks in the browser.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@rollup/pluginutils": "^5.4.0",
+    "@webgpu/types": "^0.1.44",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.2",
+    "vite-plugin-glsl": "^1.3.0"
+  }
+}
