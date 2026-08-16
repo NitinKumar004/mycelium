@@ -8,8 +8,9 @@ uint pcg_hash(uint v) {
   return (word >> 22u) ^ word;
 }
 
+// Top 24 bits → exactly representable in float, never rounds up to 1.0.
 float rand01(uint seed) {
-  return float(pcg_hash(seed)) / 4294967296.0;
+  return float(pcg_hash(seed) >> 8u) / 16777216.0;
 }
 
 vec2 dir(float angle) {

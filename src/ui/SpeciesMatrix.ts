@@ -53,6 +53,8 @@ export class SpeciesMatrix {
     let dragging = false;
     let startY = 0;
     let startVal = 0;
+    // Cells for species that aren't active must not be editable.
+    const active = (): boolean => Math.max(i, j) < activeSpecies(this.store.params);
     const onMove = (e: PointerEvent): void => {
       if (!dragging) return;
       const dv = -(e.clientY - startY) / 90; // full range over ~180px
@@ -65,6 +67,7 @@ export class SpeciesMatrix {
       window.removeEventListener('pointerup', onUp);
     };
     cell.addEventListener('pointerdown', (e) => {
+      if (!active()) return;
       dragging = true;
       startY = e.clientY;
       startVal = this.store.params.interaction[i * 4 + j] ?? 0;
@@ -73,6 +76,7 @@ export class SpeciesMatrix {
       window.addEventListener('pointerup', onUp);
     });
     cell.addEventListener('keydown', (e) => {
+      if (!active()) return;
       const cur = this.store.params.interaction[i * 4 + j] ?? 0;
       if (e.key === 'ArrowUp') { this.store.setInteraction(i, j, clamp(cur + 0.1)); this.sync(); e.preventDefault(); }
       else if (e.key === 'ArrowDown') { this.store.setInteraction(i, j, clamp(cur - 0.1)); this.sync(); e.preventDefault(); }
@@ -87,6 +91,8 @@ export class SpeciesMatrix {
         const cell = this.cells[i * 4 + j]!;
         const active = i < n && j < n;
         cell.classList.toggle('disabled', !active);
+        cell.tabIndex = active ? 0 : -1;
+        cell.setAttribute('aria-disabled', String(!active));
         const v = this.store.params.interaction[i * 4 + j] ?? 0;
         cell.style.background = divergingColor(v);
         cell.textContent = v === 0 ? '' : v.toFixed(1);

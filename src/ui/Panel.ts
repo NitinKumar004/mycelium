@@ -13,6 +13,7 @@ export interface PanelActions {
   loadPreset(name: string): void;
   morphTo(name: string): void;
   dropImage(file: File): void;
+  toggleShowcase(): boolean;
 }
 
 const GROUP_ORDER: ParamGroup[] = ['Agents', 'Chemistry', 'Species', 'Look', 'Camera'];
@@ -92,13 +93,28 @@ export class Panel {
     const updateDesc = () => { desc.textContent = PRESETS.find((p) => p.name === sel.value)?.description ?? ''; };
     sel.addEventListener('change', () => { updateDesc(); this.actions.loadPreset(sel.value); });
 
+    const btnRow = document.createElement('div');
+    btnRow.style.display = 'flex';
+    btnRow.style.gap = '8px';
+    btnRow.style.marginTop = '8px';
+
     const morphBtn = document.createElement('button');
     morphBtn.className = 'btn';
     morphBtn.textContent = 'Morph 6s';
-    morphBtn.style.marginTop = '8px';
     morphBtn.addEventListener('click', () => this.actions.morphTo(sel.value));
 
-    wrap.append(sel, desc, morphBtn);
+    const evolveBtn = document.createElement('button');
+    evolveBtn.className = 'btn signal';
+    evolveBtn.textContent = 'Auto-evolve: On';
+    evolveBtn.title = 'When idle, slowly drift through presets on its own';
+    evolveBtn.addEventListener('click', () => {
+      const on = this.actions.toggleShowcase();
+      evolveBtn.textContent = `Auto-evolve: ${on ? 'On' : 'Off'}`;
+      evolveBtn.classList.toggle('signal', on);
+    });
+
+    btnRow.append(morphBtn, evolveBtn);
+    wrap.append(sel, desc, btnRow);
     g.append(wrap);
     return g;
   }
@@ -161,7 +177,8 @@ export class Panel {
       reset.className = 'btn';
       reset.textContent = 'Reset view';
       reset.addEventListener('click', () => {
-        this.store.set('zoom', 1); this.store.params.panX = 0; this.store.params.panY = 0; this.store.revision++;
+        this.store.set('zoom', 1); this.store.params.panX = 0; this.store.params.panY = 0;
+        this.store.touch(); // fire a param event so the reset persists to the URL
         this.sync();
       });
       gbody.append(reset);

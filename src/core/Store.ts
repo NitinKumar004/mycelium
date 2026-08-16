@@ -53,12 +53,23 @@ export class Store {
   // Replace the whole parameter set (preset load / URL restore). Fires reseed +
   // rebuild + param so every subsystem resynchronizes.
   replaceAll(next: Params): void {
+    // Keep the store's OWN interaction buffer — Object.assign would otherwise
+    // adopt the caller's array (aliasing a preset's Float32Array), so later
+    // setInteraction() would silently mutate that preset.
+    const buf = this.params.interaction;
     Object.assign(this.params, next);
-    // interaction is a typed array; copy element-wise to keep the same buffer.
-    this.params.interaction.set(next.interaction);
+    this.params.interaction = buf;
+    buf.set(next.interaction);
     this.revision++;
     this.emit('rebuild', 'agentCount');
     this.emit('reseed', 'agentCount');
     this.emit('param', 'agentCount');
+  }
+
+  // Force a param notification without changing a value (e.g. after resetting
+  // pan, so persistence/redraw hooks still fire).
+  touch(): void {
+    this.revision++;
+    this.emit('param', 'panX');
   }
 }

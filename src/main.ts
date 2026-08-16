@@ -8,7 +8,7 @@ import { WebGL2Simulation } from './sim/webgl2/WebGL2Simulation';
 import { Camera } from './render/Camera';
 import { Panel, toast } from './ui/Panel';
 import type { PanelActions } from './ui/Panel';
-import { presetByName } from './presets/presets';
+import { presetByName, PRESETS } from './presets/presets';
 import { readHash, writeHash } from './state/serialize';
 import { Recorder } from './state/recorder';
 import { Morph } from './state/morph';
@@ -35,6 +35,20 @@ class App {
   private hashTimer = 0;
   private startTime = performance.now();
 
+  // Auto-evolve ("showcase"): when the user is idle, gently morph through presets
+  // so the piece behaves like living wallpaper. Any input takes control back.
+  private lastInteract = performance.now();
+  private showcaseOn = true;
+  private showcaseNextAt = 0;
+  private entered = false;
+
+  // Direct-manipulation brush. Paint/Erase inject into the trail field; Move
+  // hands the left button back to the camera for panning.
+  private tool: 'move' | 'paint' | 'erase' = 'paint';
+  private brushSize = 0.06;
+  // Reused every frame so the render loop allocates nothing (§2).
+  private readonly renderCtx = { substeps: 1, time: 0, reducedMotion: false };
+
   async boot(): Promise<void> {
     const cap = await detectCapability(this.canvas);
 
@@ -51,6 +65,8 @@ class App {
 
     this.camera = new Camera(this.store, this.canvas);
     this.camera.reducedMotion = this.reducedMotion;
+    this.camera.panEnabled = () => this.tool === 'move';
+    this.installBrush();
     this.recorder = new Recorder(this.canvas);
     this.morph = new Morph(this.store, () => this.panel.sync());
 
@@ -63,6 +79,12 @@ class App {
     this.store.on('rebuild', () => this.sim.rebuild());
     this.store.on('reseed', () => this.sim.reseed());
     this.store.on('param', () => this.scheduleHashWrite());
+
+    // Any deliberate input counts as "taking control" and pauses auto-evolve.
+    this.store.on('param', this.markInteract);
+    window.addEventListener('pointerdown', this.markInteract);
+    window.addEventListener('wheel', this.markInteract, { passive: true });
+    window.addEventListener('keydown', this.markInteract);
 
     this.installResize();
     this.installKeys();
@@ -103,16 +125,23 @@ class App {
     // clean full-screen view whenever you want.
     this.panel.setCollapsed(false);
     const cue = this.showAestheticCue();
+    this.ensureShowcaseCue();
+    this.buildToolbar();
+    this.entered = true;
+    this.lastInteract = performance.now();
+    // One friendly nudge so a first-timer knows where to start.
+    setTimeout(() => toast('Drag on the canvas to paint the swarm · right-drag erases · use the Move tool to pan. Leave it alone and it evolves on its own.'), 1400);
 
     // Fresh entry loads a gorgeous 1M-agent network; a shared-link entry keeps
     // whatever state was restored. Either way, just let the network grow — no
     // risky pyrotechnics.
     if (!keepState) {
+      // One replaceAll → one rebuild + one reseed. Fold the seed mode into the
+      // cloned params so we don't fire extra redundant reseeds on entry.
       const preset = presetByName('Classic Network')!;
-      this.store.replaceAll(preset.params);
-      this.store.set('seedMode', 'center-disc-outward', { reseed: true });
+      const params = { ...preset.params, interaction: new Float32Array(preset.params.interaction), seedMode: 'center-disc-outward' as const };
+      this.store.replaceAll(params);
       this.panel.sync();
-      this.sim.reseed();
     }
     setTimeout(() => cue.classList.add('show'), 700);
   }
@@ -128,6 +157,14 @@ class App {
     return cue;
   }
 
+  private ensureShowcaseCue(): void {
+    if (document.getElementById('showcase-cue')) return;
+    const cue = document.createElement('div');
+    cue.id = 'showcase-cue';
+    cue.innerHTML = '<span class="dot">◆</span> auto-evolving — move to take control';
+    document.body.append(cue);
+  }
+
   private buildPanel(): void {
     const actions: PanelActions = {
       reseed: () => { this.sim.reseed(); toast('Agents reseeded'); },
@@ -139,11 +176,13 @@ class App {
       exportPNG: () => this.exportPNG(),
       toggleRecord: () => {
         if (this.recorder.active) { this.recorder.stop(); toast('Recording saved'); return false; }
-        this.recorder.start(); toast('Recording…'); return true;
+        if (this.recorder.start()) { toast('Recording…'); return true; }
+        toast('Recording is not supported in this browser'); return false;
       },
       loadPreset: (name) => this.applyPreset(name, false),
       morphTo: (name) => this.applyPreset(name, true),
       dropImage: (file) => this.loadSeedImage(file),
+      toggleShowcase: () => this.toggleShowcase(),
     };
     this.panel = new Panel(this.store, actions);
   }
@@ -196,14 +235,119 @@ class App {
     if (this.morph.running) this.morph.update(dt);
     this.camera.update(dt, (now - this.startTime) / 1000);
 
-    this.sim.render({
-      substeps: this.loop.stats.substeps,
-      time: (now - this.startTime) / 1000,
-      reducedMotion: this.reducedMotion,
-    });
+    this.renderCtx.substeps = this.loop.stats.substeps;
+    this.renderCtx.time = (now - this.startTime) / 1000;
+    this.renderCtx.reducedMotion = this.reducedMotion;
+    this.sim.render(this.renderCtx);
 
+    this.updateShowcase(now);
     this.adapt(dt);
     if (this.debug) this.updateDebug();
+  }
+
+  // ---- Auto-evolve ----------------------------------------------------------
+  private markInteract = (): void => {
+    this.lastInteract = performance.now();
+    // Manual control always wins: kill any auto-evolve morph in progress so the
+    // user's change actually sticks instead of being overwritten next frame.
+    this.morph?.cancel();
+    document.getElementById('showcase-cue')?.classList.remove('show');
+  };
+
+  private updateShowcase(now: number): void {
+    if (!this.showcaseOn || !this.entered) return;
+    const idle = (now - this.lastInteract) / 1000;
+    if (idle < 22) return; // only after a clear pause
+    const cue = document.getElementById('showcase-cue');
+    cue?.classList.add('show');
+    if (this.morph.running || now < this.showcaseNextAt) return;
+    // Drift to a random preset over 8s, then hold before the next.
+    const pick = PRESETS[Math.floor(Math.random() * PRESETS.length)]!;
+    this.morph.begin(pick.params, 8);
+    this.showcaseNextAt = now + 15000;
+  }
+
+  // ---- Interactive brush ----------------------------------------------------
+  private installBrush(): void {
+    const canvas = this.canvas;
+    let painting = false;
+    let mode: 'paint' | 'erase' | null = null;
+
+    const stamp = (e: PointerEvent): void => {
+      if (!mode) return;
+      const rect = canvas.getBoundingClientRect();
+      const sx = (e.clientX - rect.left) / rect.width;
+      const sy = (e.clientY - rect.top) / rect.height;
+      const p = this.store.params;
+      const aspect = rect.width / rect.height;
+      // Screen → trail UV, matching the composite camera transform exactly.
+      const uvx = (sx - 0.5) * aspect / p.zoom + p.panX + 0.5;
+      const uvy = (sy - 0.5) / p.zoom + p.panY + 0.5;
+      const radius = this.brushSize / p.zoom;
+      const strength = mode === 'erase' ? -3.0 : 1.4;
+      this.sim.brush(uvx, uvy, radius, strength, 0);
+      this.markInteract();
+    };
+
+    canvas.addEventListener('pointerdown', (e) => {
+      if (e.button === 2) mode = 'erase';            // right button always erases
+      else if (e.button === 0) mode = this.tool === 'paint' ? 'paint' : this.tool === 'erase' ? 'erase' : null;
+      else mode = null;
+      if (!mode) return;                              // Move tool → camera pans
+      painting = true;
+      canvas.setPointerCapture(e.pointerId);
+      stamp(e);
+    });
+    canvas.addEventListener('pointermove', (e) => { if (painting) stamp(e); });
+    const stop = (): void => { painting = false; mode = null; };
+    canvas.addEventListener('pointerup', stop);
+    canvas.addEventListener('pointercancel', stop);
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  }
+
+  private buildToolbar(): void {
+    if (document.getElementById('toolbar')) return;
+    const bar = document.createElement('div');
+    bar.id = 'toolbar';
+    const tools: { id: 'move' | 'paint' | 'erase'; label: string; cursor: string }[] = [
+      { id: 'move', label: '✥ Move', cursor: 'grab' },
+      { id: 'paint', label: '✚ Paint', cursor: 'crosshair' },
+      { id: 'erase', label: '⌫ Erase', cursor: 'crosshair' },
+    ];
+    const buttons: HTMLButtonElement[] = [];
+    const setTool = (id: 'move' | 'paint' | 'erase'): void => {
+      this.tool = id;
+      for (const b of buttons) b.setAttribute('aria-pressed', String(b.dataset.tool === id));
+      this.canvas.style.cursor = tools.find((t) => t.id === id)!.cursor;
+    };
+    for (const t of tools) {
+      const b = document.createElement('button');
+      b.textContent = t.label;
+      b.dataset.tool = t.id;
+      b.setAttribute('aria-pressed', String(this.tool === t.id));
+      b.addEventListener('click', () => setTool(t.id));
+      buttons.push(b);
+      bar.append(b);
+    }
+    const sep = document.createElement('span'); sep.className = 'tb-sep'; bar.append(sep);
+    const sizeLabel = document.createElement('label');
+    sizeLabel.className = 'tb-size';
+    sizeLabel.textContent = 'Size';
+    const size = document.createElement('input');
+    size.type = 'range'; size.min = '0.02'; size.max = '0.18'; size.step = '0.005';
+    size.value = String(this.brushSize);
+    size.addEventListener('input', () => { this.brushSize = parseFloat(size.value); });
+    sizeLabel.append(size);
+    bar.append(sizeLabel);
+    document.body.append(bar);
+    setTool(this.tool);
+  }
+
+  toggleShowcase(): boolean {
+    this.showcaseOn = !this.showcaseOn;
+    if (!this.showcaseOn) document.getElementById('showcase-cue')?.classList.remove('show');
+    else this.lastInteract = performance.now() - 22000; // let it kick in soon
+    return this.showcaseOn;
   }
 
   private adapt(dt: number): void {
@@ -252,7 +396,7 @@ class App {
     // Fade the ambient hint out after a few seconds.
     const hint = document.createElement('div');
     hint.id = 'hint';
-    hint.textContent = 'drag to pan · scroll to zoom · Tab to hide panel';
+    hint.textContent = 'Paint: drag to draw · right-drag erases · scroll to zoom · switch to Move to pan · Tab hides panel';
     document.body.append(hint);
     setTimeout(() => { hint.style.opacity = '0'; }, 6000);
   }

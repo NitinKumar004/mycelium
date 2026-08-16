@@ -2,9 +2,11 @@ import type { Store } from '../core/Store';
 import type { Params } from '../core/params';
 
 // Per-parameter cross-fade between two states over N seconds (§8). Numeric
-// fields and the interaction matrix ease with a smoothstep; enums and structural
-// fields (agentCount, seedMode, simResolution) snap at the midpoint so we don't
-// reseed every frame.
+// fields and the interaction matrix ease with a smoothstep; the cheap discrete
+// fields (speciesCount, tonemap, boundary) snap at the midpoint. Structural
+// fields (agentCount, seedMode, simResolution) are deliberately NOT morphed —
+// changing them would force a reseed/rebuild mid-animation, so a morph keeps the
+// current population, seeding, and resolution.
 const EASE = (t: number) => t * t * (3 - 2 * t);
 const NUMERIC: (keyof Params)[] = [
   'moveSpeed', 'turnSpeed', 'sensorAngle', 'sensorDistance', 'depositAmount', 'decayHalfLife',
@@ -23,6 +25,13 @@ export class Morph {
 
   get running(): boolean {
     return this.to !== null;
+  }
+
+  // Stop any in-progress morph immediately, leaving params where they are.
+  // Called the instant the user interacts, so manual changes always win.
+  cancel(): void {
+    this.to = null;
+    this.from = null;
   }
 
   begin(target: Params, seconds: number): void {
@@ -46,7 +55,7 @@ export class Morph {
       p.interaction[i] = (this.from.interaction[i] ?? 0) + ((this.to.interaction[i] ?? 0) - (this.from.interaction[i] ?? 0)) * k;
     }
     if (!this.snapped && this.t >= 0.5) {
-      // Snap structural fields at the midpoint.
+      // Snap the cheap discrete fields at the midpoint (no reseed/rebuild).
       p.speciesCount = this.to.speciesCount;
       p.tonemap = this.to.tonemap;
       p.boundary = this.to.boundary;

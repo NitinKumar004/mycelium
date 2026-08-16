@@ -12,6 +12,7 @@ import compositeSrc from '../../shaders/wgsl/composite.wgsl';
 import bloomSrc from '../../shaders/wgsl/bloom.wgsl';
 import postSrc from '../../shaders/wgsl/post.wgsl';
 import seedSrc from '../../shaders/wgsl/seed.wgsl';
+import brushSrc from '../../shaders/wgsl/brush.wgsl';
 
 const TRAIL_FORMAT: GPUTextureFormat = 'rgba16float';
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
@@ -72,7 +73,10 @@ export class WebGPUSimulation implements Simulation {
   private downPipe!: GPURenderPipeline;
   private upPipe!: GPURenderPipeline;
   private postPipe!: GPURenderPipeline;
+  private brushPipe!: GPURenderPipeline;
   private bloomBGL!: GPUBindGroupLayout;
+  private brushUBO: GPUBuffer;
+  private brushData = new Float32Array(8);
 
   private frame = 0;
   private width = 1;
@@ -92,6 +96,7 @@ export class WebGPUSimulation implements Simulation {
     this.simUBO = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.renderUBO = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.seedUBO = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.brushUBO = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
     this.repeatSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'repeat', addressModeV: 'repeat' });
     this.clampSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
@@ -154,6 +159,15 @@ export class WebGPUSimulation implements Simulation {
     this.diffusePipe = fsTarget(TRAIL_FORMAT, this.module(diffuseSrc), 'fs');
     this.compositePipe = fsTarget(HDR_FORMAT, this.module(compositeSrc), 'fs');
 
+    // Cursor brush: a fullscreen stamp additively blended into the trail field.
+    const brushMod = this.module(brushSrc);
+    this.brushPipe = d.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module: fsMod, entryPoint: 'vs' },
+      fragment: { module: brushMod, entryPoint: 'fs', targets: [{ format: TRAIL_FORMAT, blend: additive }] },
+      primitive: { topology: 'triangle-list' },
+    });
+
     // Explicit layout for the bloom passes. The `down`/`up` entry points never
     // read the R uniform, so `layout: 'auto'` would drop binding 0 and reject a
     // bind group that provides it. An explicit layout keeps binding 0 present
@@ -167,16 +181,19 @@ export class WebGPUSimulation implements Simulation {
     });
     const bloomPL = d.createPipelineLayout({ bindGroupLayouts: [this.bloomBGL] });
     const bloomMod = this.module(bloomSrc);
-    const bloomPipe = (entry: string): GPURenderPipeline =>
+    const bloomPipe = (entry: string, blend?: GPUBlendState): GPURenderPipeline =>
       d.createRenderPipeline({
         layout: bloomPL,
         vertex: { module: fsMod, entryPoint: 'vs' },
-        fragment: { module: bloomMod, entryPoint: entry, targets: [{ format: HDR_FORMAT }] },
+        fragment: { module: bloomMod, entryPoint: entry, targets: [blend ? { format: HDR_FORMAT, blend } : { format: HDR_FORMAT }] },
         primitive: { topology: 'triangle-list' },
       });
     this.prefilterPipe = bloomPipe('prefilter');
     this.downPipe = bloomPipe('down');
-    this.upPipe = bloomPipe('up');
+    // The upsample chain draws with loadOp:'load' to ACCUMULATE onto the lower
+    // mip; without additive blend it would overwrite and discard all the
+    // downsampled detail, so the up pipeline must blend additively.
+    this.upPipe = bloomPipe('up', additive);
     this.postPipe = fsTarget(this.canvasFormat, this.module(postSrc), 'fs');
   }
 
@@ -468,11 +485,30 @@ export class WebGPUSimulation implements Simulation {
   }
 
   // ---- Brush / image mask ---------------------------------------------------
+  // Inject into the trail field at trail-space UV (x,y). +strength paints,
+  // -strength erases. Runs a single additive fullscreen stamp into the current
+  // trail texture (§11 — cursor forces act on the field, never teleport agents).
   brush(x: number, y: number, radius: number, strength: number, species: number): void {
-    // Inject into the trail field via a tiny additive point cloud would need a
-    // dedicated pipeline; for now we stamp a filled quad through a compute-free
-    // clear-region write. Kept minimal — see README "known-lean".
-    void x; void y; void radius; void strength; void species;
+    this.brushData[0] = x;
+    this.brushData[1] = y;
+    this.brushData[2] = Math.max(0.002, radius);
+    this.brushData[3] = strength;
+    this.brushData[4] = Math.min(3, Math.max(0, species | 0));
+    this.device.queue.writeBuffer(this.brushUBO, 0, this.brushData);
+
+    const bg = this.device.createBindGroup({
+      layout: this.brushPipe.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: this.brushUBO } }],
+    });
+    const enc = this.device.createCommandEncoder();
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{ view: this.trailView[this.cur]!, loadOp: 'load', storeOp: 'store' }],
+    });
+    pass.setPipeline(this.brushPipe);
+    pass.setBindGroup(0, bg);
+    pass.draw(3);
+    pass.end();
+    this.device.queue.submit([enc.finish()]);
   }
 
   async setSeedImage(image: ImageBitmap | null): Promise<void> {
@@ -492,8 +528,11 @@ export class WebGPUSimulation implements Simulation {
 
   // ---- PNG capture ----------------------------------------------------------
   async capturePNG(scale: number): Promise<Blob> {
-    const w = Math.min(8192, Math.round(this.width * scale));
-    const h = Math.min(8192, Math.round(this.height * scale));
+    // Clamp by a single factor so a non-square canvas keeps its framing when
+    // one dimension would exceed the 8192 texture limit.
+    const factor = Math.min(scale, 8192 / this.width, 8192 / this.height);
+    const w = Math.max(1, Math.round(this.width * factor));
+    const h = Math.max(1, Math.round(this.height * factor));
 
     // Offscreen targets at capture size (does not disturb live trail state).
     const hdr = this.device.createTexture({ size: [w, h], format: HDR_FORMAT, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT });
@@ -578,5 +617,10 @@ export class WebGPUSimulation implements Simulation {
     this.hdr?.destroy();
     this.agentBuf?.destroy();
     this.maskTex?.destroy();
+    this.simUBO.destroy();
+    this.renderUBO.destroy();
+    this.seedUBO.destroy();
+    this.brushUBO.destroy();
+    this.ctx.unconfigure();
   }
 }
