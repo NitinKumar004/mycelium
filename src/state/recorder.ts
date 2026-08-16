@@ -12,6 +12,13 @@ export class Recorder {
   start(): boolean {
     if (this.active) return true;
     const stream = this.canvas.captureStream(60);
+    // Some browsers hand back a stream with no live video track for a
+    // GPU-backed canvas; fail loudly rather than saving an empty file.
+    const track = stream.getVideoTracks()[0];
+    if (!track || track.readyState !== 'live') {
+      console.warn('[recorder] no live video track from canvas.captureStream');
+      return false;
+    }
     const type = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
       ? 'video/webm;codecs=vp9'
       : 'video/webm';
