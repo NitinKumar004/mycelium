@@ -33,9 +33,11 @@ fn pcg_hash(v: u32) -> u32 {
   return (word >> 22u) ^ word;
 }
 
-// A uniform random float in [0,1) from an agent index + frame salt.
+// A uniform random float in [0,1) from an agent index + frame salt. Uses the
+// top 24 bits so the result is exactly representable in f32 and never rounds up
+// to 1.0 (which would push a wrapped/respawned coordinate out of range).
 fn rand01(seed: u32) -> f32 {
-  return f32(pcg_hash(seed)) / 4294967296.0;
+  return f32(pcg_hash(seed) >> 8u) / 16777216.0;
 }
 
 fn dir(angle: f32) -> vec2<f32> {
