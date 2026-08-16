@@ -13,6 +13,7 @@ import diffuseFrag from '../../shaders/glsl/diffuse.frag';
 import compositeFrag from '../../shaders/glsl/composite.frag';
 import bloomFrag from '../../shaders/glsl/bloom.frag';
 import postFrag from '../../shaders/glsl/post.frag';
+import brushFrag from '../../shaders/glsl/brush.frag';
 
 const SEED_MODE_INDEX: Record<SeedMode, number> = {
   'random-uniform': 0,
@@ -48,6 +49,7 @@ export class WebGL2Simulation implements Simulation {
   private progComposite: WebGLProgram;
   private progBloom: WebGLProgram;
   private progPost: WebGLProgram;
+  private progBrush: WebGLProgram;
 
   private agentA!: Tex;
   private agentB!: Tex;
@@ -67,7 +69,10 @@ export class WebGL2Simulation implements Simulation {
   constructor(canvas: HTMLCanvasElement, adapterInfo: string, private store: Store) {
     this.canvas = canvas;
     this.adapterInfo = adapterInfo;
-    const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, powerPreference: 'high-performance' });
+    // preserveDrawingBuffer keeps the last rendered frame readable by toBlob()
+    // (PNG export runs in a separate click/keypress task, after the compositor
+    // would otherwise have cleared the buffer).
+    const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: true });
     if (!gl) throw new Error('WebGL2 unavailable');
     this.gl = gl;
     if (!gl.getExtension('EXT_color_buffer_float')) {
@@ -84,6 +89,7 @@ export class WebGL2Simulation implements Simulation {
     this.progComposite = this.program(quadVert, compositeFrag);
     this.progBloom = this.program(quadVert, bloomFrag);
     this.progPost = this.program(quadVert, postFrag);
+    this.progBrush = this.program(quadVert, brushFrag);
 
     this.rebuild();
   }
@@ -110,16 +116,18 @@ export class WebGL2Simulation implements Simulation {
     return p;
   }
 
-  private makeTex(w: number, h: number, internal: number, format: number, type: number, filter: number): Tex {
+  private makeTex(w: number, h: number, internal: number, format: number, type: number, filter: number, wrap?: number): Tex {
     const gl = this.gl;
     const tex = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, type, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
-    // Torus wrap for the trail; clamp is fine elsewhere but repeat is harmless.
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+    // Trail needs REPEAT (torus). HDR/bloom must CLAMP so the chromatic-
+    // aberration / Kawase taps don't wrap the opposite screen edge inward.
+    const wrapMode = wrap ?? gl.REPEAT;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrapMode);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrapMode);
     const fbo = gl.createFramebuffer()!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
@@ -156,10 +164,10 @@ export class WebGL2Simulation implements Simulation {
   private allocRenderTargets(w: number, h: number): void {
     const gl = this.gl;
     this.free(this.hdr); this.free(this.bloomA); this.free(this.bloomB);
-    this.hdr = this.makeTex(w, h, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
+    this.hdr = this.makeTex(w, h, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR, gl.CLAMP_TO_EDGE);
     const bw = Math.max(1, w >> 1), bh = Math.max(1, h >> 1);
-    this.bloomA = this.makeTex(bw, bh, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
-    this.bloomB = this.makeTex(bw, bh, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
+    this.bloomA = this.makeTex(bw, bh, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR, gl.CLAMP_TO_EDGE);
+    this.bloomB = this.makeTex(bw, bh, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR, gl.CLAMP_TO_EDGE);
   }
 
   resize(width: number, height: number, _dpr: number): void {
@@ -184,8 +192,15 @@ export class WebGL2Simulation implements Simulation {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
+  // Cache uniform locations per program — getUniformLocation is a sync GPU
+  // round-trip and the hot render/step paths look up many names every frame.
+  private uCache = new WeakMap<WebGLProgram, Map<string, WebGLUniformLocation | null>>();
   private u(prog: WebGLProgram, name: string): WebGLUniformLocation | null {
-    return this.gl.getUniformLocation(prog, name);
+    let m = this.uCache.get(prog);
+    if (!m) { m = new Map(); this.uCache.set(prog, m); }
+    let loc = m.get(name);
+    if (loc === undefined) { loc = this.gl.getUniformLocation(prog, name); m.set(name, loc); }
+    return loc;
   }
 
   private bindTex(unit: number, tex: WebGLTexture): void {
@@ -254,6 +269,7 @@ export class WebGL2Simulation implements Simulation {
     gl.blendEquation(gl.FUNC_ADD);
     this.bindTex(0, this.agentA.tex); gl.uniform1i(this.u(pd, 'uAgents'), 0);
     gl.uniform1i(this.u(pd, 'uAgentTexSize'), this.agentTexSize);
+    gl.uniform1i(this.u(pd, 'uAgentCount'), p.agentCount | 0);
     gl.uniform1f(this.u(pd, 'uRes'), p.simResolution);
     gl.uniform1f(this.u(pd, 'uDeposit'), p.depositAmount);
     gl.drawArrays(gl.POINTS, 0, this.agentTexSize * this.agentTexSize);
@@ -319,9 +335,20 @@ export class WebGL2Simulation implements Simulation {
     this.fullscreen(pp, null);
   }
 
-  brush(): void {
-    // Trail-field brush is a WebGPU-first feature; the WebGL2 fallback ships
-    // without it (README "known-lean").
+  brush(x: number, y: number, radius: number, strength: number, species: number): void {
+    const gl = this.gl;
+    gl.useProgram(this.progBrush);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.trailA.fbo);
+    gl.viewport(0, 0, this.trailA.w, this.trailA.h);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.uniform2f(this.u(this.progBrush, 'uCenter'), x, y);
+    gl.uniform1f(this.u(this.progBrush, 'uRadius'), Math.max(0.002, radius));
+    gl.uniform1f(this.u(this.progBrush, 'uStrength'), strength);
+    gl.uniform1i(this.u(this.progBrush, 'uChannel'), Math.min(3, Math.max(0, species | 0)));
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.disable(gl.BLEND);
   }
 
   setSeedImage(image: ImageBitmap | null): void {
@@ -347,5 +374,8 @@ export class WebGL2Simulation implements Simulation {
   dispose(): void {
     for (const t of [this.agentA, this.agentB, this.trailA, this.trailB, this.hdr, this.bloomA, this.bloomB]) this.free(t);
     if (this.maskTex) this.gl.deleteTexture(this.maskTex);
+    for (const p of [this.progAgent, this.progSeed, this.progDeposit, this.progDiffuse, this.progComposite, this.progBloom, this.progPost, this.progBrush]) {
+      this.gl.deleteProgram(p);
+    }
   }
 }
