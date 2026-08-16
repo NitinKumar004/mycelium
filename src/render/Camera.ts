@@ -13,6 +13,9 @@ export class Camera {
   private el: HTMLElement;
   private ambientPhase = 0;
   reducedMotion = false;
+  // Pan only fires when this returns true (so the Paint/Erase tools can own the
+  // left button instead). Middle-mouse always pans regardless.
+  panEnabled: () => boolean = () => true;
 
   constructor(private store: Store, el: HTMLElement) {
     this.el = el;
@@ -23,7 +26,10 @@ export class Camera {
   }
 
   private onDown = (e: PointerEvent): void => {
-    if (e.button !== 0) return;
+    // Left button pans only when the Move tool is active; middle button always.
+    const panLeft = e.button === 0 && this.panEnabled();
+    const panMiddle = e.button === 1;
+    if (!panLeft && !panMiddle) return;
     this.dragging = true;
     this.lastX = e.clientX;
     this.lastY = e.clientY;
@@ -34,12 +40,15 @@ export class Camera {
   private onMove = (e: PointerEvent): void => {
     if (!this.dragging) return;
     const rect = this.el.getBoundingClientRect();
+    const aspect = rect.width / rect.height;
     const dx = (e.clientX - this.lastX) / rect.width;
     const dy = (e.clientY - this.lastY) / rect.height;
     this.lastX = e.clientX;
     this.lastY = e.clientY;
     const z = this.store.params.zoom;
-    this.vx = -dx / z;
+    // X carries the same aspect factor the composite/brush transforms use, so
+    // the grabbed point stays under the cursor and diagonal drags don't skew.
+    this.vx = (-dx * aspect) / z;
     this.vy = -dy / z;
     this.store.params.panX += this.vx;
     this.store.params.panY += this.vy;
@@ -55,6 +64,14 @@ export class Camera {
     const factor = Math.exp(-e.deltaY * 0.0015);
     const z = this.store.params.zoom;
     const nz = Math.min(16, Math.max(0.25, z * factor));
+    if (nz === z) return;
+    // Zoom toward the cursor: keep the world point under the pointer fixed.
+    const rect = this.el.getBoundingClientRect();
+    const aspect = rect.width / rect.height;
+    const sx = ((e.clientX - rect.left) / rect.width - 0.5) * aspect;
+    const sy = (e.clientY - rect.top) / rect.height - 0.5;
+    this.store.params.panX += sx * (1 / z - 1 / nz);
+    this.store.params.panY += sy * (1 / z - 1 / nz);
     this.store.set('zoom', nz);
   };
 
