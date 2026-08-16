@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="color-scheme" content="light" />
+    <title>Mycelium — Physarum transport networks</title>
+    <meta
+      name="description"
+      content="A GPU-simulated living particle universe. One to four million autonomous agents self-organize into branching transport networks."
+    />
+  </head>
+  <body>
+    <!-- The specimen. Full-bleed, always the hero. -->
+    <canvas id="stage" aria-label="Live simulation of a Physarum transport network"></canvas>
+
+    <!-- The instrument chassis. Overlays the canvas, never shrinks it. Built by ui/Panel.ts. -->
+    <div id="chassis" aria-hidden="false"></div>
+
+    <!-- Landing gate: shown on load with the live sim shimmering behind it.
+         "Enter" drops into the immersive aesthetic view. Built/animated by main.ts. -->
+    <div id="gate">
+      <div class="gate-inner">
+        <div class="gate-kicker">Physarum polycephalum · transport-network simulation</div>
+        <div class="gate-mark">MYCELIUM</div>
+        <div class="gate-sub">A universe of a million living agents. They sense, they steer, they build. Tuned by you.</div>
+        <button id="enterbtn" class="gate-btn" type="button">Enter</button>
+        <button id="keepbtn" class="gate-link" type="button" hidden>or keep the shared state →</button>
+        <div class="gate-foot"><span id="gate-backend">initializing…</span></div>
+      </div>
+    </div>
+
+    <!-- Title sequence overlay. Hidden until the entry transition plays it. -->
+    <div id="titlecard" class="gone" aria-hidden="true">
+      <div class="titlecard-mark">MYCELIUM</div>
+      <div class="titlecard-sub">Physarum polycephalum — transport network simulation</div>
+    </div>
+
+    <!-- Dev overlay, only shown with ?debug=1 -->
+    <pre id="debug"></pre>
+
+    <noscript>Mycelium requires JavaScript and a WebGPU- or WebGL2-capable browser.</noscript>
+
+    <!-- Boot-error surface: catches module-load and runtime errors and prints
+         them on-page (diagnostic; safe to remove once running). -->
+    <div id="booterr" style="display:none;position:fixed;inset:0;z-index:999;background:#141210;color:#ffd7c2;font:13px/1.6 ui-monospace,monospace;padding:32px;white-space:pre-wrap;overflow:auto"></div>
+    <script>
+      (function () {
+        var box = document.getElementById('booterr');
+        function show(label, detail) {
+          box.style.display = 'block';
+          box.textContent += '● ' + label + '\n' + detail + '\n\n';
+        }
+        window.addEventListener('error', function (e) {
+          show('error', (e.message || '') + '\n' + (e.filename || '') + ':' + (e.lineno || '') + '\n' + (e.error && e.error.stack ? e.error.stack : ''));
+        });
+        window.addEventListener('unhandledrejection', function (e) {
+          var r = e.reason;
+          show('unhandledrejection', (r && r.stack) ? r.stack : String(r));
+        });
+      })();
+    </script>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
